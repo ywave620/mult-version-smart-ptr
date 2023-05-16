@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"unsafe"
 )
 
 // ImmRscPtr is used to safely and efficently share a mult-version immutable resource that needs to be cleaned up
@@ -23,52 +24,58 @@ type ImmutableResource interface {
 	Delete()
 }
 
-type ImmRscPtr interface {
-	//  The goroutine create this ImmRscPtr is the first owner
-	Get() ImmutableResource
-	Unref() // Unref() might call ImmutableResource::Delete() under the hood
-
-	// Owner is allowed to call ref() without sync
-	ref() ImmRscPtr
-}
 var maxGID int32 = -1
-var gLocalImmRscPtr [1024]ImmRscPtr
-var kInuse ImmRscPtr = newImmRscPtr(nil)
+var gLocalImmRscHandles [1024]*ImmRscHandle
+var kInuse *ImmRscHandle = newImmRscHandle(nil)
 
 
-func atomicSwapGLocalImmRscPtr(gID int32, new ImmRscPtr) (old ImmRscPtr) {
-	// TODO make it real
-	old = gLocalImmRscPtr[gID]
-	gLocalImmRscPtr[gID] = new
-	return old
+func atomicSwapGLocalImmRscHandle(gID int32, new *ImmRscHandle) *ImmRscHandle {
+	gLocalImmRscHandles[gID] = new
+	return (*ImmRscHandle)(atomic.SwapPointer((*unsafe.Pointer)((unsafe.Pointer)(&gLocalImmRscHandles[gID])), unsafe.Pointer(new)))
 }
-func atomicCmpAndSwapGLocalImmRscPtr(gID int32, old, new ImmRscPtr) bool {
-	// TODO make it real
-	if old == gLocalImmRscPtr[gID] {
-		gLocalImmRscPtr[gID] = new
+func atomicCmpAndSwapGLocalImmRscHandles(gID int32, old, new *ImmRscHandle) bool {
+	if old == gLocalImmRscHandles[gID] {
+		gLocalImmRscHandles[gID] = new
 		return true
 	}
-	return false
+	return atomic.CompareAndSwapPointer((*unsafe.Pointer)((unsafe.Pointer)(&gLocalImmRscHandles[gID])), unsafe.Pointer(old), unsafe.Pointer(new))
 }
 
 
 // each goroutine can call this function at most once
-func AllocateGLocalImmRscPtr() int32 {
+func AllocateGLocalImmRscHandle() int32 {
 	newId := atomic.AddInt32(&maxGID, 1) // goroutine id starts from 0
-	gLocalImmRscPtr[newId] = nil
+	gLocalImmRscHandles[newId] = nil
 	return newId
 }
 
-var latestImmRscPtr ImmRscPtr = newImmRscPtr(nil) // before any UpdateResouce() call, GetResouce() yields a ImmRscPtr wrapping a nil
-var latestImmRscPtrMutex sync.Mutex
+var latestImmRscHandle *ImmRscHandle = newImmRscHandle(nil)
+var latestImmRscHandleMutex sync.Mutex
 
-// caller should call ImmRscPtr.Unref() after done
-func GetResouce(gID int32) ImmRscPtr {
+
+type ImmRscHandleWrap struct {
+	*ImmRscHandle
+	mightPaasToOtherGoroutine bool
+}
+
+
+// If `mightPaasToOtherGoroutine`, caller is allowed to call Ref() to make a copy of the ownership
+// and then paas the copy to other goroutines. If caller uses in this way, then it must use Unref() to
+// release the ownership for evey copy.
+//
+// Otherwise, caller can not
+// 1. call Ref()
+// 2. call GetResouce() again before DoneUsingResource()
+// 3. share the handle with other goroutines
+// Caller must call DoneUsingResource() to release the ownership
+//
+// The first way is a user-friendly one but it is slower.
+func GetResouce(gID int32, mightPaasToOtherGoroutine bool) *ImmRscHandle {
 	if gID < 0 || gID > maxGID {
 		panic("unallocated goroutine ID")
 	}
 
-	// gLocalImmRscPtr[gID] is shared between this goroutine and the writer(there can be one writer only at any given time)
+	// gLocalImmRscHandles[gID] is shared between this goroutine and the writer(there can be one writer only at any given time)
 	// so this is a one-reader-one-writer conflict. We let them compete by conducting swap instruction so that the winer sees
 	// the original value while the loser sees the special mark(kInuse or nil).
 	//
@@ -77,54 +84,59 @@ func GetResouce(gID int32) ImmRscPtr {
 	// If this goroutine swaps before the writer, this func returns the second latest version.
 	// Otherwise, this func returns the latest version.
 
-	var res ImmRscPtr
-	local := atomicSwapGLocalImmRscPtr(gID, kInuse) // A
+	var res *ImmRscHandle
+	local := atomicSwapGLocalImmRscHandle(gID, kInuse) // A
 	if local == nil { // This is the first time for the current goroutine to call this func or `globalResouce` has been updated
-		latestImmRscPtrMutex.Lock()
-		res = latestImmRscPtr.ref() // Ref() can only be called with mutex held, otherwise, it might race with Unref()
-		latestImmRscPtrMutex.Unlock()
+		latestImmRscHandleMutex.Lock()
+		res = latestImmRscHandle.Ref() // Ref() can only be called with mutex held, otherwise, it might race with Unref()
+		latestImmRscHandleMutex.Unlock()
 	} else if local == kInuse {
-		panic("gLocalImmRscPtr[" + fmt.Sprint(gID) + "] must be either a valid ptr or a nil set by writer")
+		panic("gLocalImmRscHandles[" + fmt.Sprint(gID) + "] must be either a valid ptr or a nil set by writer")
 	} else {
 		res = local
 	}
 
-	// Return to local store, otherwise we have to lock the mutex to
-	// read the global `latestImmRscPtr` at the next call
-	if !atomicCmpAndSwapGLocalImmRscPtr(gID, kInuse, res.ref()) {
-		// Failed due to the local ptr(gLocalImmRscPtr[gID]) has been changed to nil by writer since A,
-		// then we rather than the next writer are responsible for Unref()
-		res.Unref()
+	if mightPaasToOtherGoroutine {
+		// Make a copy and then return to local store, otherwise we have to lock the mutex to
+		// read the global `latestImmRscPtr` at the next call
+		if !atomicCmpAndSwapGLocalImmRscHandles(gID, kInuse, res.Ref()) {
+			// Failed due to the local ptr(gLocalImmRscHandles[gID]) has been changed to nil by writer since A,
+			// then we rather than the next writer are responsible for Unref()
+			res.Unref()
+		}
+		// else the next writer will Unref() when it invalidates our local ptr
+	}
+
+	return res
+}
+
+func DoneUsingResource(gID int32, gotFromLocal *ImmRscHandle) {
+	if !atomicCmpAndSwapGLocalImmRscHandles(gID, kInuse, gotFromLocal) {
+		gotFromLocal.Unref()
 	}
 	// else the next writer will Unref() when it invalidates our local ptr
-	return res
 }
 
 // can be called by any goroutine without any synchronization
 func UpdateResouce(r ImmutableResource) {
-	latestImmRscPtrMutex.Lock()
+	latestImmRscHandleMutex.Lock()
+
+	old := latestImmRscHandle
+	latestImmRscHandle = newImmRscHandle(r) // overwritten with mutex held and before invalidate local ptrs
 
 	for i := 0; i <= int(maxGID); i ++ {
-		local := atomicSwapGLocalImmRscPtr(int32(i), nil)
+		local := atomicSwapGLocalImmRscHandle(int32(i), nil)
 		if local != kInuse && local != nil {
-			if latestImmRscPtr != local {
-				panic("gLocalImmRscPtr[" + fmt.Sprint(i) + "] does not hold the latest version")
+			if old != local {
+				panic("gLocalImmRscHandles[" + fmt.Sprint(i) + "] does not hold the latest version")
 			}
-			local.Unref() // This will never call Resource::Delete(), which is checked in the following if block
+			if local.Unref() { // This could not be the last reference, see the last line of this function
+				panic("bad refcnt")
+			}
 		}
 	}
 
-	if p, ok := latestImmRscPtr.(*resourcePtr); ok {
-		if atomic.LoadInt32(&p.refcnt) <= 0 {
-			panic("bad refcnt")
-		}
-	} else {
-		panic("bad type")
-	}
-
-	old := latestImmRscPtr
-	latestImmRscPtr = newImmRscPtr(r) // overwritten with mutex held
-	latestImmRscPtrMutex.Unlock()
+	latestImmRscHandleMutex.Unlock()
 
 	// this might call Resouce::Delete(), which might be time-consuming
 	// therefore we call it here without mutex held
@@ -133,29 +145,35 @@ func UpdateResouce(r ImmutableResource) {
 
 // unexported stuffs:
 
-func newImmRscPtr(rsc ImmutableResource) ImmRscPtr {
-	return &resourcePtr{
+func newImmRscHandle(rsc ImmutableResource) *ImmRscHandle {
+	return &ImmRscHandle{
 		refcnt: 1,
-		ImmutableResource: rsc,
+		R: rsc,
 	}
 }
 
-// never use this struct directly, use it through ImmRscPtr
-// this struct must be allocated in heap and can not be copied using = operator
-type resourcePtr struct {
+// ImmRscHandle must be allocated in heap and can not be copied using = operator
+type ImmRscHandle struct {
 	refcnt int32
-	ImmutableResource
+	R ImmutableResource
 }
-func (p *resourcePtr) ref() ImmRscPtr {
-	atomic.AddInt32(&p.refcnt, 1)
+
+// The goroutine create this ImmRscHandle is the first owner of the underlying resource
+// Owner is allowed to call Ref() without any external synchronization
+func (p *ImmRscHandle) Ref() *ImmRscHandle {
+	if atomic.AddInt32(&p.refcnt, 1) <= 0 {
+		panic("bad refcnt")
+	}
 	return p
 }
-func (p *resourcePtr) Get() ImmutableResource {
-	return p.ImmutableResource
-}
-func (p *resourcePtr) Unref() {
+func (p *ImmRscHandle) Unref() (deleted bool) {
 	after := atomic.AddInt32(&p.refcnt, -1)
 	if after == 0 {
-		p.ImmutableResource.Delete()
+		p.R.Delete()
+		return true
+	} else if after < 0 {
+		panic("bad refcnt")
 	}
+
+	return false
 }
