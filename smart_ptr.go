@@ -7,6 +7,12 @@ import (
 	"unsafe"
 )
 
+// Observation, make use of this local-global pattern to minimize locking when reading is not much useful in go.
+// Because, locking is incurred at the first read for a goroutine, and goroutine has a short lifetime in go, e.g.
+// as short as a HTTP request, as short as a TCP connection.
+// However, this patten works perfectly in languages having an idea of thread-pool, like cpp and Java. In such
+// language, a thread is long living and might serve many requests.
+
 // ImmRscPtr is used to safely and efficently share a mult-version immutable resource that needs to be cleaned up
 // whenever not used by anyone (e.g. a snapshot in DB) across multiple goroutines. It has the following features:
 //
@@ -59,7 +65,7 @@ type ImmRscHandleWrap struct {
 }
 
 
-// If `mightPaasToOtherGoroutine`, caller is allowed to call Ref() to make a copy of the ownership
+// If `mightShare`, caller is allowed to call Ref() to make a copy of the ownership
 // and then paas the copy to other goroutines. If caller uses in this way, then it must use Unref() to
 // release the ownership for evey copy.
 //
@@ -70,7 +76,7 @@ type ImmRscHandleWrap struct {
 // Caller must call DoneUsingResource() to release the ownership
 //
 // The first way is a user-friendly one but it is slower.
-func GetResouce(gID int32, mightPaasToOtherGoroutine bool) *ImmRscHandle {
+func GetResouce(gID int32, mightShare bool) *ImmRscHandle {
 	if gID < 0 || gID > maxGID {
 		panic("unallocated goroutine ID")
 	}
@@ -96,7 +102,7 @@ func GetResouce(gID int32, mightPaasToOtherGoroutine bool) *ImmRscHandle {
 		res = local
 	}
 
-	if mightPaasToOtherGoroutine {
+	if mightShare {
 		// Make a copy and then return to local store, otherwise we have to lock the mutex to
 		// read the global `latestImmRscPtr` at the next call
 		if !atomicCmpAndSwapGLocalImmRscHandles(gID, kInuse, res.Ref()) {
