@@ -10,12 +10,12 @@ How to share an immutable resource(once made, never change) among goroutines?
 
 writer:
 1. lock
-2. save the created resource in a global variable
+2. create a resource and save a reference to it in a global variable, called G
 3. set refcnt to 1
 4. unlock
 
 reader:
-1. atomically read the global variable
+1. atomically read G
 2. atomically incr refcnt by 1
 3. make use of it
 4. atomically decr refcnt by 1, if it becomes zero, clean up the resource
@@ -26,7 +26,7 @@ reader.4 races with reader.2 and may run into a situation where a reader decides
 
 reader:
 1. lock
-2. atomically read the global variable
+2. atomically reads G
 3. atomically incr refcnt by 1
 4. unlock
 5. make use of it
@@ -37,8 +37,32 @@ reader:
 
 What's wrong? Not scalable because every read requires locking.
 
-### Improve(by introducing version number)
+### Improve(by thread-localing)
 
+writer:
+1. lock
+2. create a resource and save a reference to it in a global variable, called G
+3. set refcnt to 1
+4. incr the global version number, called V by 1
+5. unlock
+
+reader:
+1. compare the thread-local version number(i.e. Vtl) with the global one
+2. if differenet
+ 
+- lock
+- read G to thread-local store, called Gtl
+- read V to thread-local store, Vtl
+- unlock
+- make use of Gtl
+
+3. otherwise, make use of Gtl
+
+What's wrong? No refcnt guarded resource reclaim anymore! A reader might hold a reference to an obsolute version forever and make no use of it. 
+
+### Improve by validating references to an obsolute version
+
+See the code
 
 ## Features
 
