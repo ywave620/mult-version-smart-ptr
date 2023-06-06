@@ -20,7 +20,9 @@ reader:
 3. make use of it
 4. atomically decr refcnt by 1, if it becomes zero, clean up the resource
 
+Classical ABA[https://en.wikipedia.org/wiki/ABA_problem] problem:
 reader.4 races with reader.2 and may run into a situation where a reader decides to cleanup the resource and another one decides to use it.
+Side note: this is also a common misuse of cpp's `std::shared_ptr<T>`
 
 ### Fix
 
@@ -41,25 +43,27 @@ What's wrong? Not scalable because every read requires locking.
 
 writer:
 1. lock
-2. create a resource and save a reference to it in a global variable, called G
-3. set refcnt to 1
-4. incr the global version number, called V by 1
-5. unlock
+2. atomically drop refcnt of G by 1, if it becomes 0, then delete the underlying resource
+3. create a resource and save a reference to it in a global variable, called G
+4. set refcnt to 1
+5. incr the global version number, called V by 1
+6. unlock
 
 reader:
 1. compare the thread-local version number(called Vtl) with the global one
 2. if differenet
  
 - lock
-- drop refcnt of the thread-local reference(called, Gtl) by 1, if it becomes 0, then delete the underlying resource
+- atomically drop refcnt of the thread-local reference(called, Gtl) by 1, if it becomes 0, then delete the underlying resource
 - read G to Gtl
 - read V to thread-local store, Vtl
+- incr refcnt of Gtl by 1 
 - unlock
 - make use of Gtl
 
 3. otherwise, make use of Gtl
 
-What's wrong? No refcnt guarded resource reclaim anymore! A reader might hold a reference to an obsolute version forever and make no use of it. 
+What's wrong? Even it seems like every version is refcnt guarded and safe from leaking, a reader might hold a reference to an obsolute version forever and make no use of it.
 
 ### Improve by validating references to an obsolute version
 
