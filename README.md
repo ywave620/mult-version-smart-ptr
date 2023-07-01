@@ -1,6 +1,6 @@
 # mult-version-smart-ptr
 
-A safe and efficent way to share a mult-version immutable resource that needs to be cleaned up whenever useless among multiple long-living goroutines.
+A safe and efficent way to share a mult-version **immutable** resource that needs to dispose whenever useless among multiple **long-living** goroutines.
 
 ## Motivation
 
@@ -71,7 +71,7 @@ See the code
 
 ## Features
 
-- Only one locking is incurred for every version of the resource: a reader locks at the first query, and for subsequent quries, only a few atomic operations is involved if no newer version.
+- Only one lock overhead for every version of the resource: a reader locks for the first query, and for subsequent quries, only a few atomic operations are involved if no newer version.
 - Like c++'s `std::shared_ptr`, if the refcnt drops to zero, the resource is automatically deleted.
 
 ## Caveat
@@ -97,3 +97,7 @@ for i := 0; i < 10; i ++ {
   }()
 }
 ```
+
+## Acknowledgement
+
+Inspired by RocksDB's MVCC implementation. https://rocksdb.org/blog/2014/06/27/avoid-expensive-locks-in-get.html
