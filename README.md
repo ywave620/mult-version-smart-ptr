@@ -65,7 +65,7 @@ reader:
 
 What's wrong? Even it seems like every version is refcnt guarded and safe from leaking, a reader might hold a reference to an obsolute version forever and make no use of it.
 
-### Improve by validating references to an obsolute version
+### Improve by disvalidating references to an obsolute version
 
 See the code
 
