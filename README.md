@@ -43,7 +43,7 @@ What's wrong? Not scalable because every read requires locking.
 
 writer:
 1. lock
-2. atomically drop refcnt of G by 1, if it becomes 0, then delete the underlying resource
+2. atomically drop the refcnt of G by 1, if it becomes 0, then delete the underlying resource
 3. create a resource and save a reference to it in a global variable, called G
 4. set refcnt to 1
 5. incr the global version number, called V by 1
@@ -65,9 +65,11 @@ reader:
 
 What's wrong? Even it seems like every version is refcnt guarded and safe from leaking, a reader might hold a reference to an obsolute version forever and make no use of it.
 
-### Improve by disvalidating references to an obsolute version
+### Improve by disvalidating references in writers
 
-See the code
+Similar to Cache-Aside pattern: write disvalidate the thread-local handle, read checks for update and synchronize the thread-local with global if any
+
+See the code for details
 
 ## Features
 
