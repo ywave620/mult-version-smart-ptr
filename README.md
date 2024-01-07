@@ -39,7 +39,7 @@ reader:
 
 What's wrong? Not scalable because every read requires locking.
 
-### Improve by thread-localing
+### Improve by thread-localing and introducing a version number
 
 writer:
 1. lock
@@ -51,7 +51,7 @@ writer:
 
 reader:
 1. compare the thread-local version number(called Vtl) with the global one
-2. if differenet
+2. if different
  
 - lock
 - atomically drop refcnt of the thread-local reference(called, Gtl) by 1, if it becomes 0, then delete the underlying resource
