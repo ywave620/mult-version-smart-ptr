@@ -90,7 +90,13 @@ func getAndUse(gid) {
   DoneUsingResource(gid, handle)
 }
 
-UpdateResouce(anImmutableObjThatHasDeleteMethod)
+UpdateResouce(NewImmutableResourceThatHasDeleteMethod())
+go func() { // mimic the behavior of writes
+  for i := 0; i < 100; i ++ {
+    UpdateResouce(NewImmutableResourceThatHasDeleteMethod())
+    time.Sleep(1 * time.Second)
+  }
+}()
 
 // shared among 10 goroutines
 for i := 0; i < 10; i ++ {
@@ -102,7 +108,7 @@ for i := 0; i < 10; i ++ {
   }()
 }
 
-// Delete() of the shared resource will be automatically called when all 10 goroutines is done using it  
+// Delete() of any shared resource will be automatically called when all 10+1 goroutines is done using it  
 ```
 
 ## Acknowledgement
