@@ -1,6 +1,6 @@
 # mult-version-smart-ptr
 
-A safe and efficent way to share a mult-version **immutable** resource that needs to dispose whenever useless among multiple **long-living** goroutines.
+A safe and efficent way to share a mult-version resource(each version itself is immutable) that needs to dispose whenever useless among multiple **long-living** goroutines.
 
 ## Motivation
 
